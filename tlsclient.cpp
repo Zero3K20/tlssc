@@ -215,10 +215,10 @@ public:
 		int ret3 = gcm_finish(&aes_gcm_remote, (unsigned char*)tag, tag_length);
 
         if ((ret1) || (ret2) || (ret3)) 
-			return "´íÎóµÄ°ü";
+			return "invalid packet";
         // check tag
         if (memcmp(in.buf + (tls_13 ? 0 : encryption_length) + decode_length, tag, tag_length) )
-			return "Êý¾ÝÐ£ÑéÊ§°Ü";
+			return "data verification failed";
 		return 0;
 	}
 	virtual int compute_size(int size, int encode_or_decode, bool tls_13)
@@ -289,7 +289,7 @@ public:
 		chacha20_poly1305_key(&chacha_remote, poly1305_key);
 		int size = chacha20_poly1305_decode(&chacha_remote, (u8*)in.buf, in.buf_size, (u8*)aad, aad_size, poly1305_key, (u8*)out.buf);
 		if(size <= 0)
-			return "Êý¾ÝÐ£ÑéÊ§°Ü";
+			return "data verification failed";
 		out.size = size;
 		return 0;
 	}
@@ -597,7 +597,7 @@ public:
 			if(chiper_list()[i].cipher == cipher)
 				cipher_index = i;
 		if(cipher_index == -1)
-			return "Ã»ÓÐ¶ÔÓ¦µÄ½âÂëÌ×¼þ";
+			return "no matching cipher suite";
 		encoder = chiper_list()[cipher_index].encoder_create();
 		if(tls_13 == false)
 			memcpy(data12.server_rand, rand, RAND_SIZE);
@@ -629,7 +629,7 @@ public:
 		{
 			pri_ecc_key[ecc_index] = new EccState;
 			if(ecc_init(pri_ecc_key[ecc_index], ecc_list()[ecc_index].size) != 0)
-				return "³õÊ¼»¯ecc keyÊ§°Ü";
+				return "ecc key init failed";
 		}
 
 		int size = MAX_PUBKEY_SIZE;
@@ -651,7 +651,7 @@ private:
 				cur_ecc = &ecc_list()[ecc_index];
 		ecc_index--;
 		if(ecc_index >= ecc_count || cur_ecc == 0)
-			return "Ã»ÕÒµ½¶ÔÓ¦µÄecc ²ÎÊý";
+			return "no matching ecc params";
 		const char *ret = 0;
 		if(ret = compute_pubkey(ecc_index, pub_key))
 			return ret;
@@ -659,7 +659,7 @@ private:
 		premaster_key.set_size(ecc_list()[ecc_index].size);
 
 		if(ecdh_shared_secret(pri_ecc_key[ecc_index], (u8*)_server_key, server_key_len, (u8*)premaster_key.buf) != 0)
-			return "ecc¼ÆËãpre master keyÊ§°Ü";
+			return "ecc pre-master key computation failed";
 
 		return 0;
 	}
@@ -667,7 +667,7 @@ public:
 	const char *tls12_compute_key(ECC_GROUP ecc, const char *_server_key, int server_key_len)
 	{
 		if(cipher_index == -1)
-			return "compute_key error:Ã»ÓÐ¶ÔÓ¦µÄ½âÂëÌ×¼þ";
+			return "compute_key error: no matching cipher suite";
 	//	CLock lock(lockdata);
 
 		tlsbuf premaster_key;
@@ -676,22 +676,22 @@ public:
 			return ret;
 		
 		int key_len = chiper_list()[cipher_index].key_len;
-		//----Ö÷ÃÜÔ¿¼ÆËã
+		// master key computation
 		char master_secret_label[] = "master secret", key_expansion[] = "key expansion";
 		_private_tls_prf((char*)data12.master_key, sizeof(data12.master_key), premaster_key.buf, premaster_key.size, master_secret_label, strlen(master_secret_label), (char*)data12.client_rand, RAND_SIZE, data12.server_rand, RAND_SIZE);
 	
-		unsigned char key[192];	//Ò»¸ö±È½Ï´óµÄÊý×é
+		unsigned char key[192];	// a relatively large array
 		_private_tls_prf((char*)key, sizeof(key), (char*)data12.master_key, sizeof(data12.master_key), key_expansion, strlen(key_expansion), (char*)data12.server_rand, RAND_SIZE, data12.client_rand, RAND_SIZE);
 		
 		if(encoder->init(key, key+key_len, key+key_len*2, key+key_len*2 + encoder->iv_len(false), key_len, false) == false)
-			return "³õÊ¼»¯cipherÊ§°Ü";
+			return "cipher init failed";
 		return 0;
 	}
 
 	const char *tls13_compute_key(ECC_GROUP ecc, const char *_server_key, int server_key_len, const char *finished_hash)
 	{
 		if(cipher_index == -1)
-			return "compute_key error:Ã»ÓÐ¶ÔÓ¦µÄ½âÂëÌ×¼þ";
+			return "compute_key error: no matching cipher suite";
 	//	CLock lock(lockdata);
 		
 		int key_len		= chiper_list()[cipher_index].key_len;
@@ -743,7 +743,7 @@ public:
 
 		
 		if(encoder->init(local_keybuffer, remote_keybuffer, local_ivbuffer, remote_ivbuffer, key_len, true) == false)
-			return "³õÊ¼»¯cipherÊ§°Ü";
+			return "cipher init failed";
 
 		return 0;
 	}
@@ -779,6 +779,56 @@ public:
 	tlsbuf &get_pubkey()
 	{
 		return pub_key;
+	}
+
+	// Server-side helpers: allow the server to inject the client random it received from
+	// ClientHello and to derive session keys with the server/client key positions swapped.
+	void set_client_rand(const void *rand)
+	{
+		memcpy(data12.client_rand, rand, RAND_SIZE);
+	}
+
+	// Like tls12_compute_key but initialises the encoder with server keys as local and
+	// client keys as remote (the server sends with the server-write key, receives with the
+	// client-write key).
+	const char *tls12_compute_key_server(ECC_GROUP ecc, const char *_client_key, int client_key_len)
+	{
+		if(cipher_index == -1)
+			return "compute_key error: no cipher";
+
+		tlsbuf premaster_key;
+		const char *ret = compute_pre_key(ecc, _client_key, client_key_len, premaster_key);
+		if(ret)
+			return ret;
+
+		int key_len = chiper_list()[cipher_index].key_len;
+		char master_secret_label[] = "master secret";
+		char key_expansion[]       = "key expansion";
+
+		_private_tls_prf((char*)data12.master_key, sizeof(data12.master_key),
+						 premaster_key.buf, premaster_key.size,
+						 master_secret_label, (unsigned int)strlen(master_secret_label),
+						 (char*)data12.client_rand, RAND_SIZE,
+						 data12.server_rand, RAND_SIZE);
+
+		unsigned char key[192];
+		_private_tls_prf((char*)key, sizeof(key),
+						 (char*)data12.master_key, sizeof(data12.master_key),
+						 key_expansion, (unsigned int)strlen(key_expansion),
+						 (char*)data12.server_rand, RAND_SIZE,
+						 (char*)data12.client_rand, RAND_SIZE);
+
+		// Key block layout: [client_write_key | server_write_key | client_write_IV | server_write_IV]
+		// Server perspective: local=server keys, remote=client keys.
+		int iv_len = encoder->iv_len(false);
+		if(encoder->init(key + key_len,                  // server_write_key  (local)
+						 key,                             // client_write_key  (remote)
+						 key + key_len * 2 + iv_len,      // server_write_IV   (local)
+						 key + key_len * 2,               // client_write_IV   (remote)
+						 key_len, false) == false)
+			return "cipher init failed";
+
+		return 0;
 	}
 
 	void encode(tlsbuf &sendbuf, const char *packet, int packet_size, bool keep_original, bool tls_13)
@@ -843,7 +893,7 @@ public:
 
 	bool verify_serverkey_exchange(int hash_type, const char *sign, int sign_size, const char *message, int msg_size)
 	{
-		return true;	//ÐèÒªÖ¤ÊéÑéÖ¤, SHA256(client_hello_random + server_hello_random + curve_info + public_key)
+		return true;	// Certificate verification needed: SHA256(client_hello_random + server_hello_random + curve_info + public_key)
 		if(encoder == 0)
 			return false;
 		//tlsbuf msg;
@@ -905,7 +955,7 @@ class tls_client
 	}
 	int get_states_count(bool tls_13)
 	{
-		return tls_13 ? 6 : 4;	//tls12ÔÚhello doneÖ±½ÓÔÊÐí·¢ËÍÏûÏ¢
+		return tls_13 ? 6 : 4;	// TLS 1.2 allows sending messages directly after hello done
 	}
 	int get_states_count()
 	{
@@ -944,16 +994,16 @@ class tls_client
 			tmp_buf.buf[0] = CONTENT_APPLICATION_DATA;
 		}
 
-		crypto.encode(tmp_buf, buf.buf, buf.size, keep_original, is_tls13(crypto.get_chiper_type()));		//-----------¼ÓÃÜ´úÂë
+		crypto.encode(tmp_buf, buf.buf, buf.size, keep_original, is_tls13(crypto.get_chiper_type()));		// encrypt
 
 		*(u_short*)(tmp_buf.buf+body_size_index) = htons(tmp_buf.size - body_size_index - 2);
 		std::ofstream tls_record_log("tls_record.log", std::ios::app | std::ios::binary);
 		tls_record_log.write(tmp_buf.buf, tmp_buf.size);
 		tls_record_log.close();
 		if( ::send(s, tmp_buf.buf, tmp_buf.size, 0) != tmp_buf.size)
-			return "·¢ËÍÊý¾ÝÊ§°Ü";
+			return "send failed";
 
-		DumpData("·¢ËÍÊý¾Ý:", tmp_buf.buf, tmp_buf.size);
+		DumpData("send data:", tmp_buf.buf, tmp_buf.size);
 		return 0;
 	}
 	
@@ -1109,8 +1159,8 @@ class tls_client
 		reader.read(server_rand, sizeof(server_rand));
 		int session_len = reader.read<char>();
 		reader.readed += session_len;
-		TLS_CIPHER	cur_cipher	= (TLS_CIPHER)ntohs(reader.read<short>());	//Ñ¡ÔñµÄÃÜÂëÌ×¼þ
-		int			compress	= reader.read<char>();		//Ñ¹Ëõ·½Ê½
+		TLS_CIPHER	cur_cipher	= (TLS_CIPHER)ntohs(reader.read<short>());	// selected cipher suite
+		int			compress	= reader.read<char>();		// compression method
 
 		const char *ret = crypto.update_server_info(cur_cipher, server_rand, is_tls13(cur_cipher));
 		if(ret)
@@ -1146,7 +1196,7 @@ class tls_client
 		if(tls_ver != 0)
 		{
 			if(tls_ver != 0x0304 || pubkey.size <= 0 || eccgroup == ECC_NONE)
-				return "·µ»ØµÄÍÖÔ²²ÎÊý²»ÕýÈ·";
+				return "invalid elliptic curve parameters returned";
 			const char *ret;
 			if(ret = crypto.tls13_compute_key(eccgroup, pubkey.buf, pubkey.size, 0))
 				return ret;
@@ -1180,7 +1230,7 @@ class tls_client
 		int server_keyexchange_size = ntohl(reader.read<char>()<<8 | reader.read<short>()<<16);
 
 		if(reader.read<char>() != 3)
-			return "²»Ö§³ÖµÄÍÖÔ²Ä£Ê½";
+			return "unsupported elliptic curve mode";
 		ECC_GROUP eccgroup = (ECC_GROUP)ntohs(reader.read<short>());
 
 		tlsbuf server_key, sign;
@@ -1198,7 +1248,7 @@ class tls_client
 		sign.append_size(sign_size);
 		reader.read(sign.buf, sign.size);
 		if(crypto.verify_serverkey_exchange(hash_type, sign.buf, sign.size, reader.buf+4, msg_size) == false)
-			return "serverkeyexchange Ç©ÃûÑéÖ¤Ê§°Ü";
+			return "ServerKeyExchange signature verification failed";
 
 		return 0;
 	}
@@ -1225,7 +1275,7 @@ class tls_client
 		crypto.compute_verify(verify, 1, server_finished_size, is_tls13(crypto.get_chiper_type()), 1);
 
         if (memcmp(verify.buf, reader.buf+reader.readed, server_finished_size)) 
-			return "on_server_finished Êý¾ÝÑéÖ¤Ê§°Ü";
+			return "Finished verify_data mismatch";
 		return 0;
 	}
 
@@ -1272,11 +1322,11 @@ class tls_client
 			if(state_index < get_states_count(tls_13) && packet_type != CONTENT_ALERT)
 			{
 				if(state_seq[state_index].content_type != packet_type || state_seq[state_index].handshake_type != reader_sig.buf[0])
-					return "´íÎóµÄ×´Ì¬";
+					return "invalid state";
 				state_index++;
 			}
 
-			DumpData("½ÓÊÕÊý¾Ý:", reader_sig.buf, reader_sig.buf_size);
+			DumpData("recv data:", reader_sig.buf, reader_sig.buf_size);
 			if(packet_type == CONTENT_HANDSHAKE && reader_sig.buf_size > 0 && reader_sig.buf[0] != MSG_FINISHED)
 				crypto.update_hash(reader_sig.buf, reader_sig.buf_size);
 			if(packet_type == CONTENT_HANDSHAKE)
@@ -1354,7 +1404,7 @@ class tls_client
 			recv_buf.check_size(recv_buf.size+4096*4);
 			int len = ::recv(s, recv_buf.buf+recv_buf.size, 4096*4, 0);
 			if(len <= 0)
-				throw "Á¬½Ó¶Ï¿ª";
+				throw "connection closed";
 			recv_buf.size += len;
 
 			int cur_index = 0;
@@ -1465,18 +1515,18 @@ public:
 	{
 		close();
 		if(host == 0 || host[0] == 0)
-			return set_err("host²ÎÊýÎÞÐ§", -1);
+			return set_err("invalid host parameter", -1);
 		
 		if(ip == 0)
 		{
 			hostent *h = gethostbyname(host);
 			if(!h || h->h_length <= 0)
-				return set_err("hostÃ»ÓÐ¶ÔÓ¦µÄip", -1);
+				return set_err("host has no corresponding IP", -1);
 			ip = *(DWORD*)h->h_addr_list[0];
 		}
 		s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if(s == INVALID_SOCKET)
-			return set_err("´´½¨socketÊ§°Ü", -1);
+			return set_err("socket creation failed", -1);
 		SOCKADDR_IN addr;
 		memset(&addr, 0, sizeof(addr));
 		addr.sin_port	=	htons(port);
@@ -1487,7 +1537,7 @@ public:
 		try
 		{
 			if(connect(s, (sockaddr*)&addr, sizeof(addr)) != 0)
-				throw "Á´½Ó·þÎñÆ÷Ê§°Ü";
+				throw "connect to server failed";
 			if((ret = send_client_hello(s, host, version)))
 				throw ret;
 
@@ -1539,7 +1589,7 @@ public:
 
 		DWORD dw = GetTickCount();
 		if(state_index < get_states_count())
-			return set_err("socket Î´³õÊ¼»¯", 0);
+			return set_err("socket not initialized", 0);
 		while(1)
 		{
 			if (received_close_notify) {
@@ -1548,7 +1598,7 @@ public:
 
 			int signal = socket_signal(recv_channel.size <= recv_channel_readed ? 1 : 0);
 			if(signal == -1)
-				return set_err("socket select´íÎó", 0);
+				return set_err("socket select error", 0);
 			if(!signal && recv_channel.size > recv_channel_readed)
 				break;
 
